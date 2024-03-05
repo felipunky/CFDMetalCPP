@@ -34,7 +34,7 @@
 #pragma region Declarations {
 
 const uint32_t maxFramesInFlight = 3;
-const uint32_t width  = 800,
+const uint32_t width  = 600,
                height = 600;
 
 struct UBO
@@ -466,7 +466,7 @@ void Renderer::buildComputePipeline()
             const float dx = 1.0;
             float dt = 0.15;//dx * dx * 0.5;
             const float Viscocity = 0.2;
-            const float Vorticity = 40.0;
+            const float Vorticity = 4.0;
             const float K = 0.2;
             float S = K / dt;
     
