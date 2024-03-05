@@ -34,8 +34,8 @@
 #pragma region Declarations {
 
 const uint32_t maxFramesInFlight = 3;
-const uint32_t width = 720,
-               height = 720;
+const uint32_t width  = 800,
+               height = 600;
 
 struct UBO
 {
@@ -309,6 +309,17 @@ void Renderer::buildShaders()
             float iTimeDelta;
         };
 
+        float dis( float2 uv, float2 mou )
+        {
+            return length( uv - mou );
+        }
+
+        float cir( float2 uv, float2 mou, float r )
+        {
+            float o = smoothstep( r, r - 0.05, dis( uv, mou ) );
+            return o;
+        }
+    
         v2f vertex vertexMain( uint vertexId [[vertex_id]],
                                device const float3* positions [[buffer(0)]],
                                device const float3* colors [[buffer(1)]] )
@@ -320,42 +331,42 @@ void Renderer::buildShaders()
         }
     
 
-        half4 fragment fragmentMain( v2f in [[stage_in]],
+        float4 fragment fragmentMain( v2f in [[stage_in]],
                                      device const UBO* ubo [[buffer(0)]],
-                                     texture2d< half, access::sample > tex [[texture(0)]],
-                                     texture2d< half, access::sample > back [[texture(1)]],
-                                     texture2d< half, access::write > wri [[texture(2)]])
+                                     texture2d< float, access::sample > tex [[texture(0)]],
+                                     texture2d< float, access::sample > back [[texture(1)]],
+                                     texture2d< float, access::write > wri [[texture(2)]])
         {
-            const float dt = 0.15;
+            const float siz = 0.025;
+            const float dx = 1.0;
+            float dt = .15;//dx * dx * 0.5;
     
-            float2 uv = in.position.xy / (ubo->iResolution);// * 2.0);
-            //uv.y = 1. - uv.y;
-            float2 mou = ubo->iMouse / ubo->iResolution;
+            float2 uv = (in.position.xy) / ubo->iResolution;
+            //uv *= 0.5;
     
-            constexpr sampler samp( address::repeat, filter::linear );
-            half4 velocity = tex.sample( samp, float2(0.0, 0.0) + uv );
+            float2 mou = ubo->iMouse;
+            
+            float2 p = in.position.xy / min( ubo->iResolution.x, ubo->iResolution.y );
     
-            float s = length( uv - mou )-.01;
-            s = smoothstep(0.0, 0.01, s);
-            float3 col = mix( float3( ( 0.5 + 0.5 * sin( ubo->iTime ) ) * 0.5, 0.0, ( 0.5 + 0.5 * cos( ubo->iTime * 2.0 ) ) ) * 0.5, float3( 0.0, 0.0, 0.0 ), s );
-            #if 0
-            if ( ubo->iTime < 1.0 )
+            float4 col = float4(0.0), colO = float4(0.0);
+            float s = cir( p, mou, siz );
+            colO = float4( mix( float3( ( 0.5 + 0.5 * sin( ubo->iTime ) ) * 0.5, 0.0, ( 0.5 + 0.5 * cos( ubo->iTime * 2.0 ) ) ) * 0.5, float3( 0.0, 0.0, 0.0 ), s ), 1.0);
+            if( s > 0.05 )
             {
-                float r = 32.;
-                r = 1. / r;
-                float hR = r * 0.5;
-                col = mix( float3( 1.0, 1.0, 1.0 ), float3( 0.0, 0.0, 0.0 ), smoothstep( 0., 0.01, abs( fmod( uv.y + hR, r ) ) - .001 ) );
+                col += colO;
             }
-            #endif
-            uv -= ( dt * ubo->iTimeDelta * ( float2( velocity.xy ) ) );
+            constexpr sampler samp( coord::normalized, address::repeat, filter::linear );
+            float4 velocity = tex.sample( samp, uv );
+        
+            uv += dt * ubo->iTimeDelta * velocity.xy;
     
-            half4 self = back.sample( samp, uv ) + half4( half3( col ), 0.0 ) * velocity.z;
+            float4 self = back.sample( samp, uv ) + col * velocity.z;
     
-            wri.write( self, uint2( in.position.xy ), 0 );
+            wri.write( self, uint2( in.position.xy ) % uint2( ubo->iResolution ), 0 );
     
-            self = back.sample( samp, in.position.xy / ( ubo->iResolution * 2.0 ) );
+            self = back.sample( samp, uv * 0.5 );
     
-            return half4( self );
+            return self;
         }
     )";
 
@@ -394,6 +405,17 @@ void Renderer::buildComputePipeline()
         #include <metal_stdlib>
         using namespace metal;
     
+        float dis( float2 uv, float2 mou )
+        {
+            return length( uv - mou );
+        }
+
+        float cir( float2 uv, float2 mou, float r )
+        {
+            float o = smoothstep( r, r - 0.05, dis( uv, mou ) );
+            return o;
+        }
+    
         struct cUBO
         {
             float2 iResolution;
@@ -403,65 +425,109 @@ void Renderer::buildComputePipeline()
             float iTimeDelta;
         };
         
-        kernel void FluidSim( texture2d< half, access::write > tex [[texture(0)]],
-                              texture2d< half, access::sample > backBuffer [[texture(1)]],
+        float2 sampleUV( uint2 coords, uint2 id, uint2 resolution )
+        {
+            return (float2(coords + id) + float2(0.5)) / float2(resolution);
+        }
+    
+        float divergence( texture2d<float> backBuffer, const sampler samp, const float2 index, const float2 step )
+        {
+            float2 left   = backBuffer.sample( samp, ( index + step * float2(-1, 0)  ) ).xy;
+            float2 right  = backBuffer.sample( samp, ( index + step * float2(1,  0)  ) ).xy;
+            float2 top    = backBuffer.sample( samp, ( index + step * float2(0,  1)  ) ).xy;
+            float2 bottom = backBuffer.sample( samp, ( index + step * float2(0, -1)  ) ).xy;
+            
+            float2 UdX = ( right - left ) * 0.5;
+            float2 UdY = ( top - bottom ) * 0.5;
+
+            float Udiv = UdX.x + UdY.y;
+        }
+    
+        float2 curl( texture2d<float> backBuffer, const sampler samp, const float2 index, const float2 step )
+        {
+            float2 direction = float2(0.0);
+            direction = float2( divergence( backBuffer, samp, index - step * float2( 0, 1 ), step ) -
+                                divergence( backBuffer, samp, index + step * float2( 0, 1 ), step ),
+                                divergence( backBuffer, samp, index - step * float2( 1, 0 ), step ) -
+                                divergence( backBuffer, samp, index + step * float2( 1, 0 ), step ) );
+            return normalize( direction );
+        }
+    
+        kernel void FluidSim( texture2d< float, access::write > tex [[texture(0)]],
+                              texture2d< float, access::sample > backBuffer [[texture(1)]],
                               uint2 index [[thread_position_in_grid]],
                               uint2 gridSize [[threads_per_grid]],
                               device const cUBO* ubo [[buffer(0)]]
                             )
         {
-            float iDx = 0.25;
-            float K = 0.2;
-            float dt = 0.15;//iDx * 0.5 * 0.5;
-            float2 CScale = 1.0 / 2.0;
+            const float siz = 0.025;
+            const float ForceVector = 20.0;
+    
+            const float dx = 1.0;
+            float dt = 0.15;//dx * dx * 0.5;
+            const float Viscocity = 0.2;
+            const float Vorticity = 40.0;
+            const float K = 0.2;
             float S = K / dt;
-            float2 invR = 1.0 / ubo->iResolution;
     
-            float2 uv = float2(index) / float2(gridSize);
-            float2 mou = ubo->iMouse / ubo->iResolution;
-            float2 p = uv - mou;
-            float s = length( p );//-.04;
-            float2 sG = p / s;
-            s -= 0.001;
-            float3 col = mix(float3(1.0, 1.0, 1.0), float3(0.0, 0.0, 0.0), s);
+            float2 invR = 1.0 / float2(gridSize);//ubo->iResolution;
+            float2 uv = sampleUV( index, uint2(0), gridSize );
+            uint maxWidthHeight = ( gridSize.x < gridSize.y ? gridSize.x : gridSize.y );
+            float2 p  = sampleUV( index, uint2(0), uint2(maxWidthHeight) );
             
-            constexpr sampler samp( address::repeat, filter::linear );
+            constexpr sampler samp( coord::normalized, address::repeat, filter::linear );
+            
+            float4 back   = backBuffer.sample( samp, uv );
+            float3 left   = backBuffer.sample( samp, sampleUV( index, uint2(-1, 0), gridSize ) ).xyz;
+            float3 right  = backBuffer.sample( samp, sampleUV( index, uint2(1,  0), gridSize ) ).xyz;
+            float3 top    = backBuffer.sample( samp, sampleUV( index, uint2(0,  1), gridSize ) ).xyz;
+            float3 bottom = backBuffer.sample( samp, sampleUV( index, uint2(0, -1), gridSize ) ).xyz;
     
-            half4 back   = backBuffer.sample( samp, uv );
-            half3 left   = backBuffer.sample( samp, uv + float2( 1.0, 0.0 ) * invR ).xyz;
-            half3 right  = backBuffer.sample( samp, uv + float2(-1.0, 0.0 ) * invR ).xyz;
-            half3 top    = backBuffer.sample( samp, uv + float2( 0.0,-1.0 ) * invR ).xyz;
-            half3 bottom = backBuffer.sample( samp, uv + float2( 0.0, 1.0 ) * invR ).xyz;
-    
-            float3 UdX = float3( right - left ) * iDx;
-            float3 UdY = float3( top - bottom ) * iDx;
+            float3 UdX = ( right - left ) * 0.5;
+            float3 UdY = ( top - bottom ) * 0.5;
 
             float Udiv = UdX.x + UdY.y;
 
             float2 DdX = float2( UdX.z, UdY.z );
     
-            back.z -= ( dt * dot( float3( DdX, Udiv ), float3( back.xyz ) ) );
-            back.z = ( clamp( back.z, half( 0.5 ), half( 3.0 ) ) );
+            back.z -= dt * dot( float3( DdX, Udiv ), back.xyz );
+            back.z = clamp( back.z, 0.5, .99 );
     
             float2 PdX = S * DdX;
-            float2 Laplacian = float2( left.xy + right.xy + top.xy + bottom.xy - 4.0 * back.xy );
-            float2 ViscosityForce = 0.3 * Laplacian;
-        
-            float2 Was = ( uv - dt * float2( back.xy ) * invR );
-    
+            float4x2 m = float4x2( left.xy, right.xy, top.xy, bottom.xy );
+            float2 Laplacian = m * float4(1.0) - 4.0 * back.xy;
+            float2 ViscosityForce = Viscocity * Laplacian;
+           
+            float2 Was = uv - dt * back.xy * invR;
             back.xy = backBuffer.sample( samp, Was ).xy;
-            
+    
             float2 ExternalForce = float2(0.0, 0.0);
-            float2 velocity = ( mou - ( ubo->iVelocity / ubo->iResolution ) );
-    
-
-            if ( col.x > 0.99 )//&& length( velocity ) > 0.1 )
+            float2 mou = ubo->iMouse;
+            float2 vel = ubo->iVelocity;
+            if( cir( p, mou, siz ) > 0.05 )// && length( ubo->iVelocity ) > 0. )
             {
-                ExternalForce += 200. * velocity;
+                ExternalForce += vel * -ForceVector;
             }
-            back.xy += dt * half2( ViscosityForce + (-PdX) + ExternalForce );
+            // Vorticity confinement.
+            float2 direction = curl( backBuffer, samp, Was, invR );
+            back.w = divergence( backBuffer, samp, Was, invR );
+            if ( length( direction ) > 0.0 )
+            {
+                back.xy += dt * Vorticity * direction * back.w;
+            }
+            
+            back.xy += dt * ( ViscosityForce - PdX + ExternalForce );
     
-            tex.write( half4( back ), index % gridSize, 0 );
+            /*float red = -(back.a - 0.5) * 2.0 + (top.x + left.x + right.x + bottom.x - 2.0);
+            float t = exp( length( uv - ubo->iMouse ) * -100.0 ); // mouse
+            red += t;
+            red *= 0.98; // damping
+            red *= step(0.1, ubo->iTime); // hacky way of clearing the buffer
+            red = 0.5 + red * 0.5;
+            red = clamp(red, 0., 1.);
+            back = float4(float3(red), back.x);*/
+    
+            tex.write( back, index % gridSize, 0 );
         }
     )";
     NS::Error* error = nullptr;
@@ -516,7 +582,7 @@ void Renderer::buildTextures()
     MTL::TextureDescriptor* pTextureDesc = MTL::TextureDescriptor::alloc()->init();
     pTextureDesc->setWidth(width);
     pTextureDesc->setHeight(height);
-    pTextureDesc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
+    pTextureDesc->setPixelFormat(MTL::PixelFormatRGBA32Float);//PixelFormatRGBA8Unorm);
     pTextureDesc->setTextureType(MTL::TextureType2D);
     pTextureDesc->setStorageMode(MTL::StorageModeManaged);
     pTextureDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
@@ -529,7 +595,7 @@ void Renderer::buildTextures()
     MTL::TextureDescriptor* pBackBufferDesc = MTL::TextureDescriptor::alloc()->init();
     pBackBufferDesc->setWidth(width);
     pBackBufferDesc->setHeight(height);
-    pBackBufferDesc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
+    pBackBufferDesc->setPixelFormat(MTL::PixelFormatRGBA32Float);//PixelFormatRGBA8Unorm);
     pBackBufferDesc->setTextureType(MTL::TextureType2D);
     pBackBufferDesc->setStorageMode(MTL::StorageModeManaged);
     pBackBufferDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
@@ -633,8 +699,9 @@ void Renderer::draw( MTK::View* pView )
     _iLastTime = _iTime;
     
     CGPoint cursor = CGEventGetLocation(CGEventCreate(NULL));
-    _iMouse = { float(cursor.x), float(cursor.y) };
-    //printf("Mouse pos: (%f, %f)\n", _iVelocity.x, _iVelocity.y);
+    float maxWidthHeight = ( width < height ? width : height );
+    _iMouse = { float(cursor.x) / maxWidthHeight, float(cursor.y) / maxWidthHeight };
+    //printf("Mouse pos: (%f, %f)\n", _iMouse.x, _iMouse.y);
     
     _frame = (_frame + 1) % maxFramesInFlight;
     
@@ -645,13 +712,13 @@ void Renderer::draw( MTK::View* pView )
     
     generateComputeTexture( pCmd );
     
-    _iVelocity = _iMouseLast;
+    _iVelocity = (_iMouse - _iMouseLast);
     //_iVelocity.x /= float( width );
     //_iVelocity.y /= float( height );
     _iMouseLast = _iMouse;
     
-    //std::cout << _iVelocity.x << ": X\n";
-    //std::cout << _iVelocity.x << ": X\n";
+    //std::cout << _iMouse.x << ": X\n";
+    //std::cout << _iMouse.y << ": Y\n";
     
     MTL::RenderPassDescriptor* pRpd = pView->currentRenderPassDescriptor();
     MTL::RenderCommandEncoder* pEnc = pCmd->renderCommandEncoder( pRpd );
