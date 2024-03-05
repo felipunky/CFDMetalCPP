@@ -34,8 +34,8 @@
 #pragma region Declarations {
 
 const uint32_t maxFramesInFlight = 3;
-const uint32_t width  = 1200,
-               height = 800;
+const uint32_t width  = 800,
+               height = 600;
 
 struct UBO
 {
@@ -349,6 +349,16 @@ void Renderer::buildShaders()
             float2 p = in.position.xy / min( ubo->iResolution.x, ubo->iResolution.y );
     
             float4 col = float4(0.0), colO = float4(0.0);
+            #if 1
+            if ( ubo->iTime < 0.1 )
+            {
+                float2 invR = 1.0 / ubo->iResolution.xy;
+                float r = 32.;
+                r = 1. / r;
+                float hR = r * 0.5;
+                col = float4( mix( float3( 1.0, 1.0, 1.0 ), float3( 0.0, 0.0, 0.0 ), smoothstep( 0., max(invR.x, invR.y) * 3.0, abs( fmod( uv.y + hR, r ) ) - r*.125 ) ), 0.0 );
+            }
+            #endif
             float s = cir( p, mou, siz );
             colO = float4( mix( float3( ( 0.5 + 0.5 * sin( ubo->iTime ) ) * 0.5, 0.0, ( 0.5 + 0.5 * cos( ubo->iTime * 2.0 ) ) ) * 0.5, float3( 0.0, 0.0, 0.0 ), s ), 1.0);
             if( s > 0.05 )
