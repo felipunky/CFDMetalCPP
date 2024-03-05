@@ -34,8 +34,8 @@
 #pragma region Declarations {
 
 const uint32_t maxFramesInFlight = 3;
-const uint32_t width  = 600,
-               height = 600;
+const uint32_t width  = 1200,
+               height = 800;
 
 struct UBO
 {
@@ -568,9 +568,10 @@ void Renderer::generateComputeTexture(MTL::CommandBuffer* pCommandBuffer)
     
     MTL::Size gridSize = MTL::Size(width, height, 1);
     NS::UInteger threadGroupSize = _cPSO->maxTotalThreadsPerThreadgroup();
-    //std::cout << "Thread group size: " << (int)threadGroupSize << "\n";
+    NS::UInteger threadGroupWidth = _cPSO->threadExecutionWidth();
+    NS::UInteger threadGroupHeight = threadGroupSize / threadGroupWidth;
     
-    MTL::Size threadGroups = MTL::Size(threadGroupSize, 1, 1);
+    MTL::Size threadGroups = MTL::Size(threadGroupWidth, threadGroupHeight, 1);
     
     computeEncoder->dispatchThreads(gridSize, threadGroups);
     computeEncoder->endEncoding();
@@ -582,7 +583,7 @@ void Renderer::buildTextures()
     MTL::TextureDescriptor* pTextureDesc = MTL::TextureDescriptor::alloc()->init();
     pTextureDesc->setWidth(width);
     pTextureDesc->setHeight(height);
-    pTextureDesc->setPixelFormat(MTL::PixelFormatRGBA32Float);//PixelFormatRGBA8Unorm);
+    pTextureDesc->setPixelFormat(MTL::PixelFormatRGBA16Float);//MTL::PixelFormatRGBA32Float);//PixelFormatRGBA8Unorm);
     pTextureDesc->setTextureType(MTL::TextureType2D);
     pTextureDesc->setStorageMode(MTL::StorageModeManaged);
     pTextureDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
@@ -595,7 +596,7 @@ void Renderer::buildTextures()
     MTL::TextureDescriptor* pBackBufferDesc = MTL::TextureDescriptor::alloc()->init();
     pBackBufferDesc->setWidth(width);
     pBackBufferDesc->setHeight(height);
-    pBackBufferDesc->setPixelFormat(MTL::PixelFormatRGBA32Float);//PixelFormatRGBA8Unorm);
+    pBackBufferDesc->setPixelFormat(MTL::PixelFormatRGBA16Float);//MTL::PixelFormatRGBA32Float);//PixelFormatRGBA8Unorm);
     pBackBufferDesc->setTextureType(MTL::TextureType2D);
     pBackBufferDesc->setStorageMode(MTL::StorageModeManaged);
     pBackBufferDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
@@ -697,6 +698,7 @@ void Renderer::draw( MTK::View* pView )
 
     _iTimeDelta = _iTime - _iLastTime;
     _iLastTime = _iTime;
+    std::cout << "Time delta: " << _iTimeDelta * 1000.0f << std::endl;
     
     CGPoint cursor = CGEventGetLocation(CGEventCreate(NULL));
     float maxWidthHeight = ( width < height ? width : height );
