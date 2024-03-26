@@ -26,6 +26,7 @@
 #include <AppKit/AppKit.hpp>
 #include <MetalKit/MetalKit.hpp>
 #include <chrono>
+#include <vector>
 
 #include <simd/simd.h>
 
@@ -78,6 +79,8 @@ class Renderer
         MTL::Buffer* _pIndexBuffer;
         MTL::Buffer* _pUniformBuffer[maxFramesInFlight];
         MTL::Buffer* _pComputeUBOBuffer;
+        MTL::Buffer* _pParticleBuffer;
+    
         dispatch_semaphore_t _semaphore;
         uint32_t _frame;
         simd::float2 _iMouse;
@@ -320,6 +323,15 @@ void Renderer::buildShaders()
             return o;
         }
     
+        float hash( float x )
+        {
+            return fract( sin( ( x*234. * 2392. ) ) );
+        }
+        float3 hash3( float x)
+        {
+            return float3( hash(x), hash(x*2.), hash(x*4.) );
+        }
+    
         v2f vertex vertexMain( uint vertexId [[vertex_id]],
                                device const float3* positions [[buffer(0)]],
                                device const float3* colors [[buffer(1)]] )
@@ -350,13 +362,19 @@ void Renderer::buildShaders()
     
             float4 col = float4(0.0), colO = float4(0.0);
             #if 1
-            if ( ubo->iTime < 0.1 )
+            if ( ubo->iTime < 0.016 )
             {
                 float2 invR = 1.0 / ubo->iResolution.xy;
                 float r = 32.;
                 r = 1. / r;
                 float hR = r * 0.5;
-                col = float4( mix( float3( 1.0, 1.0, 1.0 ), float3( 0.0, 0.0, 0.0 ), smoothstep( 0., max(invR.x, invR.y) * 3.0, abs( fmod( uv.y + hR, r ) ) - r*.125 ) ), 0.0 );
+                float id = floor( uv.y / r );
+                col = float4( mix( hash3( id ),
+                                   float3( 0.0, 0.0, 0.0 ),
+                                    smoothstep( 0.,
+                                                max(invR.x, invR.y) * 3.0,
+                                                abs( fmod( uv.y + hR, r ) ) - r*.125 ) ),
+                                                0.0 );
             }
             #endif
             float s = cir( p, mou, siz );
@@ -437,29 +455,30 @@ void Renderer::buildComputePipeline()
         
         float2 sampleUV( uint2 coords, uint2 id, uint2 resolution )
         {
-            return (float2(coords + id) + float2(0.5)) / float2(resolution);
+            return ( ( float2( coords + id ) + float2( 0.5 ) ) / float2( resolution ) );
         }
     
         float divergence( texture2d<float> backBuffer, const sampler samp, const float2 index, const float2 step )
         {
-            float2 left   = backBuffer.sample( samp, ( index + step * float2(-1, 0)  ) ).xy;
-            float2 right  = backBuffer.sample( samp, ( index + step * float2(1,  0)  ) ).xy;
-            float2 top    = backBuffer.sample( samp, ( index + step * float2(0,  1)  ) ).xy;
-            float2 bottom = backBuffer.sample( samp, ( index + step * float2(0, -1)  ) ).xy;
+            float left   = backBuffer.sample( samp, ( index + step * float2(-1, 0)  ) ).x;
+            float right  = backBuffer.sample( samp, ( index + step * float2(1,  0)  ) ).x;
+            float top    = backBuffer.sample( samp, ( index + step * float2(0,  1)  ) ).y;
+            float bottom = backBuffer.sample( samp, ( index + step * float2(0, -1)  ) ).y;
             
-            float2 UdX = ( right - left ) * 0.5;
-            float2 UdY = ( top - bottom ) * 0.5;
+            float UdX = ( right - left ) * 0.5;
+            float UdY = ( top - bottom ) * 0.5;
 
-            float Udiv = UdX.x + UdY.y;
+            float Udiv = UdX + UdY;
+            return Udiv;
         }
     
         float2 curl( texture2d<float> backBuffer, const sampler samp, const float2 index, const float2 step )
         {
             float2 direction = float2(0.0);
-            direction = float2( divergence( backBuffer, samp, index - step * float2( 0, 1 ), step ) -
-                                divergence( backBuffer, samp, index + step * float2( 0, 1 ), step ),
-                                divergence( backBuffer, samp, index - step * float2( 1, 0 ), step ) -
-                                divergence( backBuffer, samp, index + step * float2( 1, 0 ), step ) );
+            direction = float2( divergence( backBuffer, samp, ( index - step * float2( 0, 1 ) ), step ) -
+                                divergence( backBuffer, samp, ( index + step * float2( 0, 1 ) ), step ),
+                                divergence( backBuffer, samp, ( index + step * float2( 1, 0 ) ), step ) -
+                                divergence( backBuffer, samp, ( index - step * float2( 1, 0 ) ), step ) );
             return normalize( direction );
         }
     
@@ -471,12 +490,12 @@ void Renderer::buildComputePipeline()
                             )
         {
             const float siz = 0.025;
-            const float ForceVector = 20.0;
+            const float ForceVector = 80.0;
     
             const float dx = 1.0;
             float dt = 0.15;//dx * dx * 0.5;
-            const float Viscocity = 0.2;
-            const float Vorticity = 4.0;
+            const float Viscocity = 0.3;
+            const float Vorticity = 1.0;
             const float K = 0.2;
             float S = K / dt;
     
@@ -508,7 +527,7 @@ void Renderer::buildComputePipeline()
             float2 Laplacian = m * float4(1.0) - 4.0 * back.xy;
             float2 ViscosityForce = Viscocity * Laplacian;
            
-            float2 Was = uv - dt * back.xy * invR;
+            float2 Was = fract( uv - dt * back.xy * invR );
             back.xy = backBuffer.sample( samp, Was ).xy;
     
             float2 ExternalForce = float2(0.0, 0.0);
@@ -520,9 +539,9 @@ void Renderer::buildComputePipeline()
             }
             // Vorticity confinement.
             float2 direction = curl( backBuffer, samp, Was, invR );
-            back.w = divergence( backBuffer, samp, Was, invR );
-            if ( length( direction ) > 0.0 )
+            if ( length( direction ) > 1e-5 )
             {
+                back.w = divergence( backBuffer, samp, Was, invR );
                 back.xy += dt * Vorticity * direction * back.w;
             }
             
@@ -620,7 +639,7 @@ void Renderer::buildTextures()
 void Renderer::buildBuffers()
 {
     const size_t NumVertices = 4;
-
+    
     simd::float3 positions[NumVertices] =
     {
         { -1.0f, -1.0f, 0.0f },
@@ -628,7 +647,7 @@ void Renderer::buildBuffers()
         { -1.0f,  1.0f, 0.0f },
         {  1.0f, -1.0f, 0.0f }
     };
-
+    
     simd::float3 colors[NumVertices] =
     {
         {  1.0,  0.3f, 0.2f },
@@ -641,7 +660,25 @@ void Renderer::buildBuffers()
         2, 1, 0,
         0, 3, 1
     };
-
+    
+    /** Start particles  **/
+    //std::vector<simd::float3> particles;
+    size_t particleSize = height * width;
+    simd::float2 widthHeight = {(float)width, (float)height};
+    simd::float2 widthHeightStep = {1.0f / widthHeight.x, 1.0f / widthHeight.y};
+    simd::float3 particles[particleSize];
+    for (float y = 0.0f; y < 1.0; y += widthHeightStep.y)
+    {
+        for (float x = 0.0f; x < 1.0; x += widthHeightStep.x)
+        {
+            simd::float3 current = {x, y, 0.0f};
+            simd::int2 xy = {(int)x, (int)y};
+            particles[xy.y * width + xy.y] = current;
+            //std::cout << "X: " << current.x << ", Y: " << current.y << "\n";
+            //particles.push_back(current);
+        }
+    }
+    /** End particles **/
     UBO ubo;
     ubo.iMouse = { 0.0f, 0.0f };
     ubo.iResolution = { float(width), float(height) };
@@ -657,6 +694,7 @@ void Renderer::buildBuffers()
     const size_t indexDataSize = sizeof( indices );
     const size_t uniformDataSize = sizeof( ubo );
     const size_t cUniformDataSize = sizeof( cUbo );
+    const size_t particleDataSize = particleSize * sizeof( simd::float3 );
     
     MTL::Buffer* pVertexPositionsBuffer = _pDevice->newBuffer( positionsDataSize, MTL::ResourceStorageModeManaged );
     MTL::Buffer* pVertexColorsBuffer = _pDevice->newBuffer( colorDataSize, MTL::ResourceStorageModeManaged );
@@ -669,22 +707,26 @@ void Renderer::buildBuffers()
         _pUniformBuffer[i]->didModifyRange( NS::Range::Make( 0, _pUniformBuffer[i]->length() ) );
     }
     MTL::Buffer* pCUniformBuffer = _pDevice->newBuffer( cUniformDataSize, MTL::ResourceStorageModeManaged );
+    MTL::Buffer* pParticlePositionBuffer = _pDevice->newBuffer( particleDataSize, MTL::ResourceStorageModeManaged );
     _pComputeUBOBuffer = pCUniformBuffer;
     _pVertexPositionsBuffer = pVertexPositionsBuffer;
     _pVertexColorsBuffer = pVertexColorsBuffer;
     _pIndexBuffer = pIndexBuffer;
+    _pParticleBuffer = pParticlePositionBuffer;
     //_pUniformBuffer = pUniformBuffer;
 
     memcpy( _pVertexPositionsBuffer->contents(), positions, positionsDataSize );
     memcpy( _pVertexColorsBuffer->contents(), colors, colorDataSize );
     memcpy( _pIndexBuffer->contents(), indices, indexDataSize );
     memcpy( _pComputeUBOBuffer->contents(), &cUbo, cUniformDataSize );
+    memcpy( _pParticleBuffer->contents(), pParticlePositionBuffer, particleDataSize );
     //memcpy( _pUniformBuffer->contents(), &ubo, uniformDataSize );
 
     _pVertexPositionsBuffer->didModifyRange( NS::Range::Make( 0, _pVertexPositionsBuffer->length() ) );
     _pVertexColorsBuffer->didModifyRange( NS::Range::Make( 0, _pVertexColorsBuffer->length() ) );
     _pIndexBuffer->didModifyRange( NS::Range::Make( 0, _pIndexBuffer->length() ) );
     _pComputeUBOBuffer->didModifyRange( NS::Range::Make( 0, _pComputeUBOBuffer->length() ) );
+    _pParticleBuffer->didModifyRange( NS::Range::Make( 0, _pParticleBuffer->length() ) );
     //_pUniformBuffer->didModifyRange( NS::Range::Make( 0, _pUniformBuffer->length() ) );
 }
 
@@ -708,7 +750,7 @@ void Renderer::draw( MTK::View* pView )
 
     _iTimeDelta = _iTime - _iLastTime;
     _iLastTime = _iTime;
-    std::cout << "Time delta: " << _iTimeDelta * 1000.0f << std::endl;
+    //std::cout << "Time delta: " << _iTimeDelta * 1000.0f << std::endl;
     
     CGPoint cursor = CGEventGetLocation(CGEventCreate(NULL));
     float maxWidthHeight = ( width < height ? width : height );
@@ -748,7 +790,8 @@ void Renderer::draw( MTK::View* pView )
                                 _pIndexBuffer,
                                 0,
                                 1 );
-    //pEnc->drawPrimitives( MTL::PrimitiveType::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(4) );
+    
+    pEnc->
 
     pEnc->endEncoding();
     pCmd->presentDrawable( pView->currentDrawable() );
